@@ -63,15 +63,16 @@
       }
     }
   }
-  function fromNative(cue) {
+  function fromNative(cue, original) {
+    if (original) return {text:cue.text || '',settings:original};
     var set = {align:cue.align || 'center',size:String(cue.size == null ? 100 : cue.size)};
     if (typeof cue.position === 'number') set.position = cue.position + '%,' + (cue.positionAlign || 'auto');
-    if (typeof cue.line === 'number') set.line = cue.line + (cue.snapToLines === false ? '%' : '') + ',' + (cue.lineAlign || 'start');
+    if (typeof cue.line === 'number') set.line = cue.line + (cue.snapToLines === false ? '%' : '') + ',' + (cue.lineAlign || (cue.snapToLines === false && cue.line > 50 ? 'end' : cue.snapToLines === false && cue.line === 50 ? 'center' : 'start'));
     if (cue.vertical) set.vertical = cue.vertical;
     return {text:cue.text || '',settings:set};
   }
   function Layer(options) {
-    this.options = options; this.manual = null; this.signature = '';
+    this.options = options; this.manual = null; this.signature = ''; this.documents = {}; this.documentCount = 0;
     this.box = document.createElement('div');
     this.box.style.cssText = 'position:fixed;pointer-events:none;overflow:hidden;z-index:999;display:none';
     document.body.appendChild(this.box);
@@ -79,6 +80,30 @@
     this.timer = setInterval(function () { self.tick(); }, 100);
   }
   Layer.prototype.set = function (cues) { this.manual = cues; this.tick(); };
+  Layer.prototype.original = function (video, track, cue) {
+    var elements = video.querySelectorAll ? video.querySelectorAll('track') : [], source = '';
+    for (var i = 0; i < elements.length; i++) if (elements[i].track === track) source = elements[i].src;
+    if (!source) return null;
+    var document = this.documents[source], self = this;
+    if (!document && typeof XMLHttpRequest !== 'undefined') {
+      if (this.documentCount >= 4) { this.documents = {}; this.documentCount = 0; }
+      document = {cues:[]}; this.documents[source] = document; this.documentCount++;
+      var request = new XMLHttpRequest();
+      request.open('GET', source, true);
+      request.onload = function () {
+        if (request.status >= 200 && request.status < 300 || request.status === 0) {
+          document.cues = parse(request.responseText); self.signature = ''; self.tick();
+        }
+      };
+      request.onerror = function () {};
+      try { request.send(); } catch (error) {}
+    }
+    var cues = document ? document.cues : [];
+    for (var j = 0; j < cues.length; j++) {
+      if (Math.abs(cues[j].s-cue.startTime) < 0.002 && Math.abs(cues[j].e-cue.endTime) < 0.002 && cues[j].text.replace(/\n+$/, '') === String(cue.text).replace(/\n+$/, '')) return cues[j].settings;
+    }
+    return null;
+  };
   Layer.prototype.tick = function () {
     var video = this.options.video();
     if (!video || !video.videoWidth || !video.videoHeight || video.readyState < 1) { this.box.style.display = 'none'; return; }
@@ -94,7 +119,7 @@
       for (var i = 0; tracks && i < tracks.length; i++) {
         if (tracks[i].mode !== 'showing') continue;
         var active = tracks[i].activeCues;
-        for (var j = 0; active && j < active.length; j++) cues.push(fromNative(active[j]));
+        for (var j = 0; active && j < active.length; j++) cues.push(fromNative(active[j], this.original(video, tracks[i], active[j])));
       }
     }
     var rect = video.getBoundingClientRect(), scale = Math.min(rect.width/video.videoWidth, rect.height/video.videoHeight);
