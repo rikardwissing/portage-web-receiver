@@ -218,7 +218,8 @@
       var span = document.createElement('span');
       var dx = text.horizontal === 'left' ? 0 : text.horizontal === 'right' ? -100 : -50;
       var dy = text.vertical === 'top' ? 0 : text.vertical === 'bottom' ? -100 : -50;
-      span.textContent = text.text;
+      if (text.markup && root.PortageSubtitleText) root.PortageSubtitleText.content(span, text.markup);
+      else span.textContent = text.text;
       span.style.cssText = 'position:absolute;white-space:pre-wrap;color:white;font-family:sans-serif;max-width:90%;' +
         'text-shadow:0 1px 3px black,1px 0 3px black,-1px 0 3px black;line-height:1.2;text-align:' +
         (text.horizontal === 'left' ? 'left' : text.horizontal === 'right' ? 'right' : 'center') + ';font-size:' +
