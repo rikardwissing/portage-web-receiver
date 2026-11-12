@@ -1235,11 +1235,8 @@ MkvEngine.prototype.sleep_ = function (ms) {
   return new Promise(function (resolve) { setTimeout(resolve, ms); });
 };
 
-// Decode one subtitle block into displayable text. SRT-in-MKV blocks ARE the
-// cue text; ASS/SSA blocks are one Dialogue line whose 9th field is the text
-// (commas inside it are literal), with {\override} tags stripped and \N as
-// the line break.
 MkvEngine.prototype.subtitleText_ = function (codecId, bytes) {
+  if (codecId !== 'S_TEXT/UTF8') return null;
   var raw = '';
   try {
     if (typeof TextDecoder !== 'undefined') {
@@ -1252,13 +1249,7 @@ MkvEngine.prototype.subtitleText_ = function (codecId, bytes) {
     }
   } catch (e) { return null; }
   raw = raw.replace(/ +$/, '');
-  if (codecId !== 'S_TEXT/UTF8') {
-    var parts = raw.split(',');
-    if (parts.length < 9) return null;
-    raw = parts.slice(8).join(',');
-    raw = raw.replace(/\{[^}]*\}/g, '');
-    raw = raw.replace(/\\N/g, '\n').replace(/\\n/g, '\n').replace(/\\h/g, ' ');
-  }
+
   raw = raw.replace(/\s+$/, '');
   return raw || null;
 };
