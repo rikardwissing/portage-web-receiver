@@ -1107,11 +1107,20 @@ function MkvEngine(url, audioTypeIndex, opts) {
   this.landKeyMs_ = null;
   this.fetcher = opts.fetcher || function (start, end, signal) {
     if (typeof fetch === 'function') {
+      var phase = 'headers';
+      var status = 0;
+      var length = null;
+      var redirected = false;
       return fetch(url, { headers: { Range: 'bytes=' + start + '-' + end },
                           signal: signal })
         .then(function (r) {
+          status = r.status;
+          length = r.headers.get('Content-Length');
+          redirected = !!r.redirected;
+          phase = 'status';
           if (r.status !== 206 && r.status !== 200) throw new Error('HTTP ' + r.status);
           var total = mkvRangeTotal(r.headers.get('Content-Range'));
+          phase = 'body';
           return r.arrayBuffer().then(function (buf) {
             if (r.status === 200) total = buf.byteLength;
             if (total) self.totalBytes = total;
@@ -1123,6 +1132,12 @@ function MkvEngine(url, audioTypeIndex, opts) {
             }
             return buf;
           });
+        }).then(null, function (error) {
+          self.log('mkvengine: HTTP range failure bytes=' + start + '-' + end +
+            ' phase=' + phase + ' status=' + status + ' length=' + (length || '?') +
+            ' redirected=' + redirected + ' aborted=' + !!(signal && signal.aborted) +
+            ' online=' + (typeof navigator !== 'undefined' ? navigator.onLine : '?'));
+          throw error;
         });
     }
     // 2017 TVs have no fetch — XHR does the same job, with its own timeout
