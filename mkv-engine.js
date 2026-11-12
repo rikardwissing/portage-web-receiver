@@ -1249,6 +1249,7 @@ MkvEngine.prototype.subtitleText_ = function (codecId, bytes) {
 };
 
 MkvEngine.prototype.abortInflight_ = function () {
+  this.retryingFetch_ = null;
   if (!this.inflightAbort) return;
   try { this.inflightAbort.abort(); } catch (e) {}
   this.inflightAbort = null;
@@ -1266,14 +1267,41 @@ MkvEngine.prototype.abortInflight_ = function () {
 //  - RETRIES on a fresh connection, which doubles as the workaround for a
 //    server that throttles long-lived ones (the same lesson the chunked
 //    download engine learned from this PMS).
+MkvEngine.prototype.playableAhead_ = function () {
+  var now = this.getTime() || 0;
+  var ahead = Infinity;
+  var count = 0;
+  for (var key in this.lanes) {
+    var held = 0;
+    try {
+      var ranges = this.lanes[key].sb.buffered;
+      for (var i = 0; i < ranges.length; i++) {
+        if (ranges.start(i) <= now && ranges.end(i) > now) held = ranges.end(i) - now;
+      }
+    } catch (e) {}
+    ahead = Math.min(ahead, held);
+    count++;
+  }
+  return count ? ahead : 0;
+};
+
+MkvEngine.prototype.fetchFailed_ = function (where, error) {
+  this.log('mkvengine: ' + where + ': ' + error);
+  if (error && error.portageNetwork) {
+    this.fatal_('The connection to the video source was interrupted.', { reason: 'network', track: 'stream' });
+  } else {
+    this.fatal_(where + ': ' + error);
+  }
+};
+
 MkvEngine.prototype.fetchRange_ = function (start, end, gen) {
   var self = this;
   var lastErr = null;
+  var retryUntil = Date.now() + Math.min(120000, Math.max(30000, (this.playableAhead_() + 15) * 1000));
   function attemptFetch(attempt) {
     if (self.dead || (gen != null && gen !== self.generation)) {
       return Promise.reject(lastErr || new Error('superseded'));
     }
-    if (attempt > 3) attempt = 3;   // timeouts re-enter here without counting up
     var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
     self.inflightAbort = ctrl;
     var timedOut = false;
@@ -1282,14 +1310,14 @@ MkvEngine.prototype.fetchRange_ = function (start, end, gen) {
       try { ctrl.abort(); } catch (e) {}
     }, self.fetchTimeoutMs) : null;
     var t0 = Date.now();
-    return Promise.resolve(self.fetcher(start, end, ctrl ? ctrl.signal : undefined))
+    return Promise.resolve().then(function () { return self.fetcher(start, end, ctrl ? ctrl.signal : undefined); })
       .then(function (buf) {
         if (buf && !(buf instanceof ArrayBuffer) && !ArrayBuffer.isView(buf) && buf.buffer) {
           if (buf.total > 0) self.totalBytes = buf.total;
           buf = buf.buffer;
         }
         if (timer) clearTimeout(timer);
-        self.inflightAbort = null;
+        if (self.inflightAbort === ctrl) self.inflightAbort = null;
         self.lastFetchDoneAt = Date.now();
         self.bytesFetched += buf && buf.byteLength ? buf.byteLength : 0;
         var took = Date.now() - t0;
@@ -1301,7 +1329,7 @@ MkvEngine.prototype.fetchRange_ = function (start, end, gen) {
         return buf;
       }, function (e) {
         if (timer) clearTimeout(timer);
-        self.inflightAbort = null;
+        if (self.inflightAbort === ctrl) self.inflightAbort = null;
         self.lastFetchDoneAt = Date.now();
         lastErr = e;
         // Aborted because we were superseded or torn down — not an error.
@@ -1310,16 +1338,21 @@ MkvEngine.prototype.fetchRange_ = function (start, end, gen) {
         // "the connection dropped" — measured 2026-08-24: an idle PMS serving
         // media at 100KB/s times out every window while its API answers in
         // 66ms. The two need different words.
+        timedOut = timedOut || /timeout|timed out/i.test(String(e));
         if (timedOut) self.sawSlowFetch = true;
         self.log('mkvengine: fetch @' + start + ' attempt ' + attempt + ' failed after ' +
                  (Date.now() - t0) + 'ms: ' + (timedOut ? 'timeout' : e));
-        // A TIMEOUT is a slow server, not a dead one — keep trying for as
-        // long as the load lives, spinner showing (Rikard's call 2026-08-24:
-        // never abort a stream because the server is merely slow). Real
-        // errors (404, refused) still give up after three tries.
-        if (!timedOut && attempt >= 3) throw lastErr;
-        return self.sleep_(500 * attempt).then(function () {
-          return attemptFetch(timedOut ? attempt : attempt + 1);
+        var transient = /failed to fetch|network|fetch failed|load failed|HTTP (408|429|5[0-9][0-9])/i.test(String(e));
+        if (!timedOut && (transient ? Date.now() >= retryUntil : attempt >= 3)) {
+          var failure = new Error(String(lastErr));
+          failure.portageNetwork = true;
+          throw failure;
+        }
+        var retry = {};
+        self.retryingFetch_ = retry;
+        return self.sleep_(Math.min(5000, 500 * Math.pow(2, Math.min(attempt - 1, 4)))).then(function () {
+          if (self.retryingFetch_ === retry) self.retryingFetch_ = null;
+          return attemptFetch(attempt + 1);
         });
       });
   }
@@ -1347,7 +1380,7 @@ MkvEngine.prototype.start_ = function () {
       if (self.dead) return;
       self.openLanes_();
     });
-  }).then(null, function (e) { self.fatal_('start: ' + e); });
+  }).then(null, function (e) { self.fetchFailed_('start', e); });
 };
 
 // Cues are an optimization (cue-less files estimate seeks by byte position),
@@ -1538,7 +1571,7 @@ MkvEngine.prototype.pumpFrom_ = function (ms) {
     self.pump_(offset, offset === self.demux.firstClusterOffset ? null : ms);
   }).then(null, function (e) {
     if (self.dead || gen !== self.generation) return;
-    self.fatal_('seek: ' + e);
+    self.fetchFailed_('seek', e);
   });
 };
 
@@ -1835,7 +1868,7 @@ MkvEngine.prototype.stallCheck_ = function () {
     }
     return;
   }
-  if (this.inflightAbort) return;                // pump is actively fetching
+  if (this.inflightAbort || this.retryingFetch_) return;                // pump is actively fetching
   if (Date.now() - this.lastFetchDoneAt < 3000) return;  // …or just was
   this.log('mkvengine: gap at ' + Math.round(t) + 's — repump (t=' + t.toFixed(2) + ' ' + this.rangesText_() + ')');
   this.repump_(t);
@@ -2160,7 +2193,7 @@ MkvEngine.prototype.pump_ = function (startOffset, landMs) {
       // Superseded mid-fetch (a seek, an audio switch, a teardown): the
       // abort is ours, not a failure.
       if (self.dead || gen !== self.generation) return;
-      self.fatal_('fetch@' + offset + ': ' + e);
+      self.fetchFailed_('fetch@' + offset, e);
     });
   }
   step();
