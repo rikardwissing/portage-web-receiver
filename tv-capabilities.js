@@ -116,8 +116,9 @@
     if(pending.length&&typeof Promise!=='undefined')Promise.all(pending).then(function(){measured=true;finish();});else{measured=true;finish();}
   };
   window.PortageCanPlayAnswer=function(v,msg,done,mediaSourceOnly){
-    var MS=window.MediaSource, mc=navigator.mediaCapabilities, nativeHls=false;
-    try{nativeHls=!mediaSourceOnly&&!!v.canPlayType('application/vnd.apple.mpegurl');}catch(e){}
+    var MS=window.MediaSource, mc=navigator.mediaCapabilities, hls='';
+    try{if(!mediaSourceOnly)hls=v.canPlayType('application/vnd.apple.mpegurl')||'';}catch(e){}
+    var nativeHls=hls!=='';
     function plain(config){
       var mime=config.mime||(config.kind==='audio'?'audio/mp4':'video/mp4');
       return config.codecs&&mime!=='audio/mpeg'?mime+'; codecs="'+config.codecs+'"':mime;
@@ -149,7 +150,8 @@
     var hdr=screen('(dynamic-range: high)');
     function reply(){
       if(sent)return; sent=true;
-      done({type:'canPlayAnswer',id:msg.id,answers:answers,containers:containers,device:{IS_HDR_SUPPORTED:hdr,IS_DV_SUPPORTED:hdr}});
+      done({type:'canPlayAnswer',id:msg.id,answers:answers,containers:containers,hls:hls,mediaSource:!!MS,
+            device:{IS_HDR_SUPPORTED:hdr,IS_DV_SUPPORTED:hdr}});
     }
     function settle(){pending--; if(pending<=0)reply();}
     function decoding(config,i){
