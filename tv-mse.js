@@ -52,6 +52,7 @@
     this.fetcher=fetcher||null;                              // null = XHR Range
     this.mediaSource=new MediaSource(); this.objectUrl=URL.createObjectURL(this.mediaSource);
     this.mp4=MP4Box.createFile(); this.buffers={}; this.queues={video:[],audio:[]};
+    this.appendGen=0; this.quotaTimers={};
     this.initSegs={}; this.audioTracks=[]; this.videoTrackId=null; this.audioTrackId=null;
     this.fetchOffset=0; this.fetchGen=0; this.inflight=null; this.totalBytes=null; this.dead=false;
     this.initRange=null;                                     // {start,length} from the load, when known
@@ -68,6 +69,7 @@
     if(this.dead)return;
     trace('engine fatal: '+reason);
     this.dead=true;
+    this.cancelAppends(false);
     var handler=this.onEngineFailed;
     if(handler){ this.onEngineFailed=null; try{handler(reason)}catch(e){} }
   };
@@ -262,8 +264,8 @@
        said only that ~3.9 s had gone somewhere in here. */
     var tInit=nowMs();
     try{
-      this.enqueue('video',this.buildInit(video.id,'video'));
-      if(!silent) this.enqueue('audio',this.buildInit(audio.id,'audio'));
+      this.enqueue('video',this.buildInit(video.id,'video'),true);
+      if(!silent) this.enqueue('audio',this.buildInit(audio.id,'audio'),true);
     }catch(eInit){playbackError('Couldn’t prepare this video to play.');trace('engine init build failed: '+eInit);return;}
     var tExtract=nowMs();
     this.resetExtraction();
@@ -361,20 +363,82 @@
       if(sb.buffered.start(i)-.05<=t0&&t1<=sb.buffered.end(i)+.05) return true;
     return false;
   };
-  MseEngine.prototype.enqueue=function(kind,buffer){if(!buffer)return;this.queues[kind].push(buffer);this.drain(kind)};
-  MseEngine.prototype.drain=function(kind){
-    var sb=this.buffers[kind];
-    if(this.dead||!sb||sb.updating||this.mediaSource.readyState==='closed') return;
-    var next=this.queues[kind].shift(); if(!next) return;
-    try{sb.appendBuffer(next)}catch(e){
-      if(e.name==='QuotaExceededError'){this.queues[kind].unshift(next);this.evict(kind)}
-      else if(v.error){
-        /* The element is fatally errored — every future append fails the
-           same way, so hand straight off to the plain-playback fallback
-           instead of retrying forever. */
-        this.fatal('media element error code='+v.error.code+(v.error.message?' '+v.error.message:'')+' during '+kind+' append');
+  /* Keep one fragment and a byte cursor until its real updateend. Slices are
+     views, not copies; quota only retries bytes the browser rejected. */
+  MseEngine.prototype.enqueue=function(kind,buffer,isInit){
+    if(this.dead||!buffer)return;
+    var data=buffer instanceof ArrayBuffer?new Uint8Array(buffer):
+      new Uint8Array(buffer.buffer,buffer.byteOffset,buffer.byteLength);
+    this.queues[kind].push({bytes:data,offset:0,size:4*1024*1024,init:!!isInit});
+    this.drain(kind);
+  };
+  MseEngine.prototype.retryQuota=function(kind){
+    if(this.quotaTimers[kind]!=null)return;
+    var self=this, gen=this.appendGen, sb=this.buffers[kind];
+    this.quotaTimers[kind]=setTimeout(function(){
+      if(self.dead||gen!==self.appendGen||sb!==self.buffers[kind])return;
+      delete self.quotaTimers[kind];
+      self.drain(kind);
+    },250);
+  };
+  MseEngine.prototype.cancelAppends=function(keepInit){
+    this.appendGen++;
+    var self=this;
+    ['video','audio'].forEach(function(kind){
+      if(self.quotaTimers[kind]!=null)clearTimeout(self.quotaTimers[kind]);
+      delete self.quotaTimers[kind];
+      var queue=self.queues[kind], head=queue[0], sb=self.buffers[kind];
+      self.queues[kind]=keepInit?queue.filter(function(entry){return entry.init}):[];
+      // Abort resets a partial MP4 box before any new seek data reaches MSE.
+      // A pending init belongs to every seek: let its native append finish.
+      if(head&&head.offset>0&&(!keepInit||!head.init)&&sb&&self.mediaSource.readyState==='open'){
+        try{sb.abort()}catch(e){}
       }
-      else trace('engine append '+kind+' failed: '+e);
+    });
+  };
+  MseEngine.prototype.queuedBytes=function(){
+    var total=0, kinds=['video','audio'];
+    for(var k=0;k<kinds.length;k++){
+      var queue=this.queues[kinds[k]];
+      for(var i=0;i<queue.length;i++)total+=queue[i].bytes.byteLength;
+    }
+    return total;
+  };
+  MseEngine.prototype.drain=function(kind){
+    var sb=this.buffers[kind], queue=this.queues[kind];
+    if(this.dead||!sb||sb.updating||this.mediaSource.readyState==='closed'||this.quotaTimers[kind]!=null)return;
+    while(queue.length){
+      var next=queue[0];
+      if(next.offset===next.bytes.byteLength){queue.shift();continue;}
+      var end=Math.min(next.offset+next.size,next.bytes.byteLength);
+      try{
+        sb.appendBuffer(next.bytes.subarray(next.offset,end));
+        next.offset=end;
+        return;                                      // wait for real updateend
+      }catch(e){
+        if(e.name==='QuotaExceededError'){
+          if(!next.reportedQuota){
+            next.reportedQuota=true;
+            // A full media buffer is not a format refusal or a dead transfer.
+            // Let the host retire its startup watchdog without replacing media.
+            if(window.tvHelpers&&window.tvHelpers.bufferPressure)window.tvHelpers.bufferPressure();
+          }
+          if(end-next.offset>64*1024){
+            next.size=Math.max(64*1024,Math.floor((end-next.offset)/2));
+            continue;
+          }
+          // Eviction may do nothing, especially at the start or while paused.
+          // Always schedule a retry, without changing the stream or format.
+          this.retryQuota(kind);
+          this.evict(kind);
+        }else if(v.error){
+          this.fatal('media element error code='+v.error.code+(v.error.message?' '+v.error.message:'')+' during '+kind+' append');
+        }else{
+          queue.shift();
+          trace('engine append '+kind+' failed: '+e);
+        }
+        return;
+      }
     }
   };
   MseEngine.prototype.evict=function(kind){
@@ -422,7 +486,7 @@
     this.fetchOffset=offset;
     function step(){
       if(self.dead||gen!==self.fetchGen) return;
-      if(self.bufferedAheadSec()>90){
+      if(self.queuedBytes()>16*1024*1024||self.bufferedAheadSec()>90){
         setTimeout(function(){
           if(self.dead||gen!==self.fetchGen) return;
           self.evict('video');self.evict('audio');step();
@@ -733,6 +797,7 @@
        reports cancellation through its error path can't be mistaken for a
        real fetch failure (pump() takes the next generation below). */
     this.fetchGen++;
+    this.cancelAppends(true);
     if(this.inflight){try{this.inflight.abort()}catch(e){}this.inflight=null;}
     /* "dropping parsedTail=" it said, for months, while never assigning it —
        there is no writer here and never was. It is KEPT deliberately: the moov
@@ -769,6 +834,7 @@
   };
   MseEngine.prototype.destroy=function(){
     this.dead=true;this.fetchGen++;
+    this.cancelAppends(false);
     if(this.inflight){try{this.inflight.abort()}catch(e){}this.inflight=null;}
     try{this.mp4.stop()}catch(e){}try{URL.revokeObjectURL(this.objectUrl)}catch(e){}
   };
