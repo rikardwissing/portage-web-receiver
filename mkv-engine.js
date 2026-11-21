@@ -97,6 +97,7 @@ var MKV_ID = {
   FlagDefault: 0x88,
   CodecID: 0x86,
   CodecPrivate: 0x63A2,
+  ContentEncodings: 0x6D80,
   DefaultDuration: 0x23E383,
   CodecDelay: 0x56AA,
   Language: 0x22B59C,
@@ -130,6 +131,7 @@ var MKV_ID = {
 function MkvDemuxer() {
   this.timestampScale = 1000000;   // ns per tick; default 1ms ticks
   this.durationTicks = 0;          // Info.Duration (in ticks)
+  this.tracksByNumber = {};
   this.tracks = [];                // {number,type,codecId,codecPrivate,defaultDurationNs,video{},audio{},language}
   this.segmentStart = 0;           // file offset of the Segment payload
   this.cuesOffset = null;          // file offset of the Cues element (from SeekHead)
@@ -238,6 +240,8 @@ MkvDemuxer.prototype.parseTracks_ = function (r) {
         case MKV_ID.FlagDefault: track.isDefault = t.readUint(tsize.value) === 1; break;
         case MKV_ID.CodecID: track.codecId = t.readString(tsize.value).replace(/\0+$/, ''); break;
         case MKV_ID.CodecPrivate: track.codecPrivate = t.readBytes(tsize.value); break;
+        case MKV_ID.ContentEncodings:
+          track.encodings = this.parseEncodings_(new MkvByteReader(t.readBytes(tsize.value), 0)); break;
         case MKV_ID.DefaultDuration: track.defaultDurationNs = t.readUint(tsize.value); break;
         case MKV_ID.CodecDelay: track.codecDelayNs = t.readUint(tsize.value); break;
         case MKV_ID.Language: track.language = t.readString(tsize.value).replace(/\0+$/, ''); break;
@@ -271,8 +275,63 @@ MkvDemuxer.prototype.parseTracks_ = function (r) {
         default: t.pos += tsize.value;
       }
     }
+    var encodings = track.encodings || [];
+    encodings.sort(function (a, b) { return b.order - a.order; });
+    for (var e = 0; e < encodings.length; e++) {
+      var encoding = encodings[e];
+      if (encoding.type !== 0 || encoding.algorithm !== 3 || !encoding.scope || (encoding.scope & ~3) ||
+          (e && encodings[e - 1].order === encoding.order)) {
+        track.encodingError = 'unsupported Matroska content encoding on track ' + track.number;
+      }
+    }
+    if (!track.encodingError && track.codecPrivate) track.codecPrivate = this.restoreHeaders_(track, track.codecPrivate, 2);
     this.tracks.push(track);
+    this.tracksByNumber[track.number] = track;
   }
+};
+
+// RFC 9559 ContentEncodings: undo encodings in descending order. Header
+// stripping applies to EACH frame after unlacing, and/or to CodecPrivate.
+// Other compression/encryption must never be passed to a codec as clear data.
+MkvDemuxer.prototype.parseEncodings_ = function (r) {
+  var encodings = [];
+  function fields(reader, compression) {
+    while (reader.remaining() > 1) {
+      var key = reader.readVint(true), length = reader.readVint(false);
+      if (!key || !length || length.unknown || length.value > reader.remaining()) throw new Error('invalid ContentEncoding');
+      var n = length.value;
+      if (!compression && key.value === 0x5031) encoding.order = reader.readUint(n);
+      else if (!compression && key.value === 0x5032) encoding.scope = reader.readUint(n);
+      else if (!compression && key.value === 0x5033) encoding.type = reader.readUint(n);
+      else if (!compression && key.value === 0x5034) fields(new MkvByteReader(reader.readBytes(n), 0), true);
+      else if (compression && key.value === 0x4254) encoding.algorithm = reader.readUint(n);
+      else if (compression && key.value === 0x4255) encoding.header = reader.readBytes(n);
+      else reader.pos += n;
+    }
+  }
+  while (r.remaining() > 1) {
+    var id = r.readVint(true), size = r.readVint(false);
+    if (!id || !size || size.unknown || size.value > r.remaining()) throw new Error('invalid ContentEncodings');
+    var bytes = r.readBytes(size.value);
+    if (id.value !== 0x6240) continue;
+    var encoding = { order: 0, scope: 1, type: 0, algorithm: 0, header: new Uint8Array(0) };
+    fields(new MkvByteReader(bytes, 0), false);
+    encodings.push(encoding);
+  }
+  return encodings;
+};
+
+MkvDemuxer.prototype.restoreHeaders_ = function (track, data, scope) {
+  var encodings = track.encodings || [];
+  for (var i = 0; i < encodings.length; i++) {
+    var encoding = encodings[i];
+    if (!(encoding.scope & scope) || !encoding.header.length) continue;
+    var restored = new Uint8Array(encoding.header.length + data.length);
+    restored.set(encoding.header, 0);
+    restored.set(data, encoding.header.length);
+    data = restored;
+  }
+  return data;
 };
 
 MkvDemuxer.prototype.parseColour_ = function (r) {
@@ -432,6 +491,8 @@ MkvDemuxer.prototype.parseBlock_ = function (u8, clusterTicks, keyOverride, onSa
   var r = new MkvByteReader(u8, 0);
   var trackNum = r.readVint(false);
   if (!trackNum) return;
+  var track = this.tracksByNumber[trackNum.value];
+  if (track && track.encodingError) return;
   var rel = (r.u8[r.pos] << 8) | r.u8[r.pos + 1];
   if (rel & 0x8000) rel -= 0x10000;    // signed int16
   r.pos += 2;
@@ -479,7 +540,7 @@ MkvDemuxer.prototype.parseBlock_ = function (u8, clusterTicks, keyOverride, onSa
     ? durationTicks * this.timestampScale / 1e6 : null;
   for (var f = 0; f < frames.length; f++) {
     onSample(trackNum.value, { ptsMs: ptsMs, laceIndex: f, laceCount: frames.length,
-                               keyframe: keyframe, durationMs: durationMs, data: frames[f] });
+                               keyframe: keyframe, durationMs: durationMs, data: track ? this.restoreHeaders_(track, frames[f], 1) : frames[f] });
   }
 };
 
@@ -1596,6 +1657,7 @@ MkvEngine.prototype.muxer_ = function (track, timescale) {
 };
 
 MkvEngine.prototype.trackSupported_ = function (track) {
+  if (track.encodingError) return false;
   var timescale = Fmp4Muxer.timescaleFor(track);
   var muxer = this.muxer_(track, timescale);
   return !!muxer.codecString() && MediaSource.isTypeSupported(muxer.contentType());
@@ -1614,6 +1676,9 @@ MkvEngine.prototype.openLanes_ = function () {
       if (t.type === 1 && !video) video = t;
       if (t.type === 2) audioTracks.push(t);
     }
+    var wantedAudio = audioTracks[Math.max(0, Math.min(this.audioTypeIndex || 0, audioTracks.length - 1))];
+    var invalid = video && video.encodingError ? video : wantedAudio && wantedAudio.encodingError ? wantedAudio : null;
+    if (invalid) { this.fatal_(invalid.encodingError); return; }
     if (video && !this.trackSupported_(video)) {
       this.fatal_('this device cannot decode the video (' + this.trackCodec_(video) + ')',
                   { track: 'video', codecs: [this.trackCodec_(video)] });
