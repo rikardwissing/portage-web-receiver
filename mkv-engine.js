@@ -413,7 +413,7 @@ MkvDemuxer.prototype.parseClusters = function (u8, base, onSample) {
     if (size.unknown) throw new Error('unknown-size cluster unsupported');
     if (r.remaining() < size.value) break;   // partial cluster — wait for more
     var body = new MkvByteReader(r.readBytes(size.value), 0);
-    this.parseClusterBody_(body, onSample);
+    this.parseClusterBody_(body, function (number, raw) { onSample(number, raw, base + mark); });
     consumed = r.pos;
   }
   return consumed;
@@ -458,15 +458,18 @@ MkvDemuxer.prototype.findClusters = function (u8, base, totalBytes) {
   return found;
 };
 
-MkvDemuxer.prototype.parseClusterBody_ = function (r, onSample) {
+MkvDemuxer.prototype.parseClusterBody_ = function (r, onSample, partial) {
   var clusterTicks = 0;
   while (r.remaining() > 1) {
     var id = r.readVint(true); var size = r.readVint(false);
-    if (!id || !size || size.unknown || r.remaining() < size.value) break;
+    if (!id || !size || size.unknown) break;
+    var cut = r.remaining() < size.value;
+    if (cut && !(partial && (id.value === MKV_ID.SimpleBlock || id.value === MKV_ID.BlockGroup))) break;
+    var emit = cut ? function (number, raw) { raw.truncated = true; onSample(number, raw); } : onSample;
     if (id.value === MKV_ID.Timestamp) {
       clusterTicks = r.readUint(size.value);
     } else if (id.value === MKV_ID.SimpleBlock) {
-      this.parseBlock_(r.readBytes(size.value), clusterTicks, null, onSample);
+      this.parseBlock_(r.readBytes(size.value), clusterTicks, null, emit);
     } else if (id.value === MKV_ID.BlockGroup) {
       var g = new MkvByteReader(r.readBytes(size.value), 0);
       var blockBytes = null, hasReference = false, durationTicks = null;
@@ -480,10 +483,11 @@ MkvDemuxer.prototype.parseClusterBody_ = function (r, onSample) {
           g.pos += gsize.value;
         }
       }
-      if (blockBytes) this.parseBlock_(blockBytes, clusterTicks, !hasReference, onSample, durationTicks);
+      if (blockBytes) this.parseBlock_(blockBytes, clusterTicks, !hasReference, emit, durationTicks);
     } else {
       r.pos += size.value;
     }
+    if (cut) break;
   }
 };
 
@@ -1156,6 +1160,40 @@ function mkvRangeTotal(text) {
   return m ? parseInt(m[1], 10) : null;
 }
 
+// AVC and HEVC samples in Matroska and MP4 use length-prefixed NAL units.
+function independentNalPicture(bytes, lengthSize, avc, truncated) {
+  if (!bytes) return false;
+  if (!(lengthSize >= 1 && lengthSize <= 4)) return false;
+  for (var offset = 0; offset + lengthSize < bytes.length;) {
+    var size = 0;
+    for (var i = 0; i < lengthSize; i++) size = size * 256 + bytes[offset + i];
+    offset += lengthSize;
+    if (size <= 0 || offset >= bytes.length || (!truncated && offset + size > bytes.length)) return false;
+    var type = avc ? bytes[offset] & 31 : (bytes[offset] >> 1) & 63;
+    if (avc ? type === 5 : type >= 16 && type <= 21) return true;
+    offset += size;
+  }
+  return false;
+}
+
+var MKV_ACCESS_WINDOW_MS = 24000;
+
+function mkvAccessConfig(track) {
+  var avc = track.codecId === 'V_MPEG4/ISO/AVC';
+  var index = avc ? 4 : 21;
+  var config = track.codecPrivate;
+  if (!(avc || track.codecId === 'V_MPEGH/ISO/HEVC') || !config || config.length <= index || config[0] !== 1) return null;
+  return { avc: avc, length: (config[index] & 3) + 1 };
+}
+
+function mkvNoteAccess(lane, raw, offset) {
+  if (!lane.access || !raw.keyframe) return false;
+  var known = lane.clusterAccess;
+  var independent = independentNalPicture(raw.data, lane.access.length, lane.access.avc, raw.truncated);
+  if (independent && (known[offset] == null || raw.ptsMs < known[offset])) known[offset] = raw.ptsMs;
+  return independent;
+}
+
 function MkvEngine(url, audioTypeIndex, opts) {
   opts = opts || {};
   var self = this;
@@ -1626,16 +1664,78 @@ MkvEngine.prototype.estimateOffset_ = function (ms, gen) {
   });
 };
 
+MkvEngine.prototype.cueIndex_ = function (ms) {
+  var cues = this.demux.cues, lo = 0, hi = cues.length;
+  while (lo < hi) {
+    var mid = Math.floor((lo + hi) / 2);
+    if (cues[mid].timeMs <= ms) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo - 1;
+};
+
+MkvEngine.prototype.decodeOffset_ = function (ms, lane, gen, target) {
+  var self = this, demux = this.demux, cues = demux.cues, offset = cues[target].clusterOffset;
+  if (offset === demux.firstClusterOffset) return Promise.resolve(offset);
+  var earliest = target, minTime = ms - MKV_ACCESS_WINDOW_MS;
+  while (earliest > 0 && cues[earliest - 1].timeMs >= minTime) earliest--;
+  function cached() {
+    for (var i = target; i >= earliest; i--) {
+      var at = lane.clusterAccess[cues[i].clusterOffset];
+      if (at != null && at >= minTime && at <= ms) return cues[i].clusterOffset;
+    }
+    return null;
+  }
+  function note(number, raw, cluster) {
+    if (number === lane.track.number) mkvNoteAccess(lane, raw, cluster);
+  }
+  function read(start, end) {
+    return self.fetchRange_(start, end, gen).then(function (buffer) {
+      if (gen !== self.generation || self.dead) throw new Error('seek superseded');
+      return new Uint8Array(buffer);
+    });
+  }
+  var found = cached();
+  if (found != null) return Promise.resolve(found);
+  var end = Math.min(offset + 64 * 1024, self.totalBytes || Infinity);
+  return read(offset, end - 1).then(function (bytes) {
+    var r = new MkvByteReader(bytes, offset);
+    var id = r.readVint(true), size = id && r.readVint(false);
+    if (size && !size.unknown && id.value === MKV_ID.Cluster) {
+      var body = bytes.subarray(r.pos, r.pos + size.value);
+      try {
+        demux.parseClusterBody_(new MkvByteReader(body, 0), function (number, raw) { note(number, raw, offset); }, true);
+      } catch (e) {}
+    }
+    var access = cached();
+    if (access != null) return access;
+    var first = target;
+    while (first > earliest && cues[first - 1].clusterOffset <= offset &&
+           offset - cues[first - 1].clusterOffset <= 2 * 1024 * 1024) first--;
+    var start = cues[first].clusterOffset;
+    if (start >= offset) return offset;
+    return read(start, offset - 1).then(function (earlier) {
+      demux.parseClusters(earlier, start, note);
+      var previous = cached();
+      return previous == null ? offset : previous;
+    });
+  });
+};
+
 MkvEngine.prototype.pumpFrom_ = function (ms) {
   var self = this;
   var gen = this.generation;
-  if (this.demux.cues.length || ms <= 5000) {
-    this.pump_(this.offsetForMs_(ms), null);
+  var video = this.videoLane_, cues = this.demux.cues, target = this.cueIndex_(ms);
+  var inspect = ms > 0 && target >= 0 && video && video.access;
+  var estimate = inspect ? ms - cues[target].timeMs > MKV_ACCESS_WINDOW_MS : !cues.length && ms > 5000;
+  if (!inspect && !estimate) {
+    this.pump_(target < 0 ? this.demux.firstClusterOffset : cues[target].clusterOffset, null);
     return;
   }
-  this.estimateOffset_(ms, gen).then(function (offset) {
+  var seek = estimate ? this.estimateOffset_(ms, gen) : this.decodeOffset_(ms, video, gen, target);
+  return seek.then(function (offset) {
     if (self.dead || gen !== self.generation) return;
-    self.pump_(offset, offset === self.demux.firstClusterOffset ? null : ms);
+    self.pump_(offset, estimate && offset !== self.demux.firstClusterOffset ? ms : null);
   }).then(null, function (e) {
     if (self.dead || gen !== self.generation) return;
     self.fetchFailed_('seek', e);
@@ -1758,7 +1858,8 @@ MkvEngine.prototype.openLanes_ = function () {
       var mime = muxer.contentType();
       var sb = this.mediaSource.addSourceBuffer(mime);
       var lane = { muxer: muxer, timeline: new MkvTrackTimeline(track, timescale),
-                   sb: sb, queue: [], pending: [], pendingSinceMs: null, track: track };
+                   sb: sb, queue: [], pending: [], pendingSinceMs: null, track: track,
+                   access: mkvAccessConfig(track), accessTimes: {}, clusterAccess: {} };
       (function (self2, lane2) {
         sb.addEventListener('updateend', function () { self2.checkKept_(lane2); self2.drain_(lane2); });
         sb.addEventListener('error', function () {
@@ -1773,6 +1874,7 @@ MkvEngine.prototype.openLanes_ = function () {
         });
       })(this, lane);
       this.lanes[track.number] = lane;
+      if (track.type === 1) this.videoLane_ = lane;
       this.log('mkvengine: lane ' + track.number + ' ' + mime);
     }
     try { this.mediaSource.duration = this.demux.durationMs() / 1000; } catch (e) {}
@@ -1791,15 +1893,6 @@ MkvEngine.prototype.openLanes_ = function () {
   } catch (e) { this.fatal_('start: ' + e); }
 };
 
-MkvEngine.prototype.offsetForMs_ = function (ms) {
-  var offset = this.demux.firstClusterOffset;
-  for (var i = 0; i < this.demux.cues.length; i++) {
-    if (this.demux.cues[i].timeMs <= ms) offset = this.demux.cues[i].clusterOffset;
-    else break;
-  }
-  return offset;
-};
-
 MkvEngine.prototype.drain_ = function (lane) {
   if (this.dead || !lane.sb || lane.sb.updating) return;
   // An append or remove reopens an 'ended' source, which a seek back after the pump reached the end needs.
@@ -1816,6 +1909,7 @@ MkvEngine.prototype.drain_ = function (lane) {
   try {
     if (fragment.timestampOffset != null) lane.sb.timestampOffset = fragment.timestampOffset;
     lane.sb.appendBuffer(fragment);
+    if (fragment.accessTime != null) lane.accessTimes[fragment.accessTime] = fragment.independent;
   } catch (e) {
     if (e && e.name === 'QuotaExceededError') {
       lane.queue.unshift(fragment);
@@ -1857,13 +1951,34 @@ MkvEngine.prototype.checkKept_ = function (lane) {
   }
 };
 
-// Removing the start of a GOP takes the rest of it too, so nothing within 10 s behind the playhead is stale.
+MkvEngine.prototype.playedEnd_ = function (lane, cutoff, allowOrdinary) {
+  if (!lane.access) return cutoff;
+  var independent = -Infinity, ordinary = 0, ranges = lane.sb.buffered;
+  for (var key in lane.accessTimes) {
+    var point = Number(key), i = 0;
+    while (i < ranges.length && !(point >= ranges.start(i) - 0.001 && point < ranges.end(i))) i++;
+    if (i === ranges.length) delete lane.accessTimes[key];
+    else if (point <= cutoff) {
+      ordinary = Math.max(ordinary, point);
+      if (lane.accessTimes[key]) independent = Math.max(independent, point);
+    }
+  }
+  var end = !allowOrdinary && cutoff - independent <= MKV_ACCESS_WINDOW_MS / 1000 ? independent : ordinary;
+  // Stop before the access point so rounding cannot remove the following GOP.
+  return Math.max(0, end - 0.001);
+};
+
 MkvEngine.prototype.staleRanges_ = function (lane, now) {
   var out = [];
   try {
     var b = lane.sb.buffered;
     if (!b.length) return out;
-    if (b.start(0) < now - 11) out.push([b.start(0), now - 10]);
+    var start = b.start(0), end = start < now - 11 ? this.playedEnd_(lane, now - 10) : start;
+    if (lane.access && end <= start + 0.001 && b.end(b.length - 1) <= now + 1) {
+      // A full buffer with no runway must release a played cue before it can accept the next picture.
+      end = this.playedEnd_(lane, now - 2, true);
+    }
+    if (end > start + 0.001) out.push([start, end]);
     if (b.end(b.length - 1) > now + 91) out.push([now + 90, b.end(b.length - 1)]);
   } catch (e) {}
   return out;
@@ -1872,7 +1987,13 @@ MkvEngine.prototype.staleRanges_ = function (lane, now) {
 MkvEngine.prototype.flushLane_ = function (lane) {
   if (!lane.pending.length) return;
   if (lane.track.type === 1) lane.timeline.settle(lane.pending);
-  lane.queue.push(lane.muxer.fragment(lane.pending));
+  var first = lane.pending[0];
+  var fragment = lane.muxer.fragment(lane.pending);
+  if (lane.access && first.keyframe) {
+    fragment.independent = first.independent;
+    fragment.accessTime = first.pts / lane.timeline.timescale;
+  }
+  lane.queue.push(fragment);
   lane.pending = [];
   lane.pendingSinceMs = null;
   this.drain_(lane);
@@ -1925,7 +2046,7 @@ MkvEngine.prototype.stallCheck_ = function () {
     var hop = this.bufferedStartAfter_(t);
     var landing = hop != null && this.landKeyMs_ != null && Math.abs(hop * 1000 - this.landKeyMs_) < 1000;
     var starting = t <= 0.05 && hop != null && hop < 10;
-    if (hop != null && (hop - t < 2 || landing || starting) && this.isBuffered_(hop + 0.05)) {
+    if (hop != null && hop > t && (hop - t < 2 || landing || starting) && this.isBuffered_(hop + 0.05)) {
       this.log('mkvengine: gap hop ' + t.toFixed(2) + 's -> ' + hop.toFixed(2) + 's');
       this.landKeyMs_ = null;
       try { this.seekTo(hop + 0.05); } catch (e) {}
@@ -2126,7 +2247,7 @@ MkvEngine.prototype.pump_ = function (startOffset, landMs) {
   var sawEnd = false;
 
   // The demux callback, shared by every window this run parses.
-  function onBlock(trackNum, raw) {
+  function onBlock(trackNum, raw, clusterOffset) {
     var sub = self.subTracks_[trackNum];
     if (sub) {
       if (self.onCue) {
@@ -2174,6 +2295,9 @@ MkvEngine.prototype.pump_ = function (startOffset, landMs) {
     raw.data = lane.muxer.sampleData(raw.data);
     raw.frameTicks = lane.muxer.frameTicks(raw.data);
     var sample = lane.timeline.convert(raw);
+    if (lane.access && raw.keyframe) {
+      sample.independent = mkvNoteAccess(lane, raw, clusterOffset);
+    }
     lane.pending.push(sample);
     if (lane.pendingSinceMs == null) lane.pendingSinceMs = raw.ptsMs;
     if (raw.ptsMs > self.appendedMs) self.appendedMs = raw.ptsMs;
@@ -2254,8 +2378,13 @@ MkvEngine.prototype.pump_ = function (startOffset, landMs) {
         var behind = (self.getTime() || 0) - 40;
         if (behind > 0) {
           for (var k in self.lanes) {
-            var sb = self.lanes[k].sb;
-            if (sb && !sb.updating) { try { sb.remove(0, behind); } catch (e2) {} }
+            var lane = self.lanes[k], sb = lane.sb;
+            if (sb && !sb.updating) {
+              try {
+                var end = self.playedEnd_(lane, behind);
+                if (sb.buffered.length && end > sb.buffered.start(0) + 0.001) sb.remove(0, end);
+              } catch (e2) {}
+            }
           }
         }
       }
@@ -2274,6 +2403,7 @@ MkvEngine.prototype.pump_ = function (startOffset, landMs) {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    independentNalPicture: independentNalPicture,
     MkvDemuxer: MkvDemuxer,
     Fmp4Muxer: Fmp4Muxer,
     MkvTrackTimeline: MkvTrackTimeline,
