@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="apple-itunes-app" content="app-id=6816252844">
+<link rel="icon" type="image/png" href="../icon.png">
+<title>Watch Together · Portage</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; color: #F4F7FF;
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased; }
+  body { background: radial-gradient(1200px 640px at 50% -10%, rgba(25,216,230,0.16), transparent 60%),
+      radial-gradient(900px 620px at 88% 116%, rgba(123,69,246,0.12), transparent 60%),
+      #0B0D22;
+    display: flex; align-items: center; justify-content: center; padding: 24px; box-sizing: border-box; }
+  .card { width: 100%; max-width: 380px; text-align: center; padding: 40px 30px;
+    border-radius: 30px; background: rgba(255,255,255,0.035);
+    border: 1px solid rgba(255,255,255,0.08);
+    box-shadow: 0 40px 90px -34px rgba(0,0,0,0.85); }
+  .mark { width: 66px; height: 66px; margin: 0 auto 18px; display: block; border-radius: 16px;
+    filter: drop-shadow(0 10px 24px rgba(25,216,230,0.38)); }
+  h1 { font-size: 22px; font-weight: 700; margin: 0 0 6px; }
+  p { color: #AEB7D4; font-size: 15px; margin: 0 0 24px; }
+  .btn { display: inline-flex; align-items: center; justify-content: center;
+    width: 100%; height: 52px; border-radius: 16px; text-decoration: none;
+    font-size: 17px; font-weight: 700; color: #0B0D22; box-sizing: border-box;
+    background-image: linear-gradient(135deg, #19E2D3, #268CFF, #7B45F6);
+    box-shadow: 0 14px 32px -12px rgba(38,140,255,0.55); }
+  .alt { display: block; margin-top: 16px; color: #19D8E6; font-size: 15px; font-weight: 600; text-decoration: none; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <img class="mark" src="../icon.png" alt="">
+    <h1>Watch Together</h1>
+    <p id="lead">You're invited to watch in step, each from your own copy in Portage.</p>
+    <a class="btn" id="primary" href="https://apps.apple.com/app/id6816252844">Get Portage on the App Store</a>
+    <a class="alt" id="secondary" hidden>Open in Portage</a>
+  </div>
+  <script>
+    (function () {
+      var room = (location.search.match(/[?&]r=([A-Za-z0-9_-]{1,64})/) || [])[1];
+      var key = location.hash.replace(/^#/, "");
+      var store = "https://apps.apple.com/app/id6816252844";
+      var lead = document.getElementById("lead");
+      var primary = document.getElementById("primary");
+      var secondary = document.getElementById("secondary");
+      if (!room || !/^[A-Za-z0-9_-]{43}$/.test(key)) {
+        lead.textContent = "This invite link isn't complete. Ask for the link again.";
+        return;
+      }
+      var app = "portage://together?r=" + room + "#" + key;
+      var ua = navigator.userAgent;
+      var touch = navigator.maxTouchPoints > 1;
+      var mac = /Macintosh/.test(ua) && !touch;
+      var apple = mac || /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && touch);
+      if (mac) {
+        lead.textContent = "Opening Portage. If nothing happens, open it below.";
+        primary.textContent = "Open Portage";
+        primary.href = app;
+        secondary.textContent = "Get Portage on the App Store";
+        secondary.href = store;
+        secondary.hidden = false;
+        setTimeout(function () { location.href = app; }, 300);
+      } else if (apple) {
+        secondary.href = app;
+        secondary.hidden = false;
+      } else {
+        lead.textContent = "Watch Together needs Portage on iPhone, iPad or Mac.";
+      }
+    })();
+  </script>
+</body>
+</html>

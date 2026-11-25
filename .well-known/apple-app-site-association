@@ -5,7 +5,9 @@
         "appIDs": ["GC88SQF2BV.dev.rikard.portage"],
         "components": [
           { "/": "/auth-done", "comment": "Plex sign-in hands control back here" },
-          { "/": "/auth-done/*" }
+          { "/": "/auth-done/*" },
+          { "/": "/together", "comment": "Watch Together invites; the room key stays in the # part" },
+          { "/": "/together/*" }
         ]
       }
     ]
