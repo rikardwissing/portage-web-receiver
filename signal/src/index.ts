@@ -1,4 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
+import { WatchRoom } from "./watch-room";
+
+export { WatchRoom };
 
 const ROOM_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const SESSION_RE = /^[A-Za-z0-9_-]{1,128}$/;
@@ -13,6 +16,7 @@ const CORS = {
 
 interface Env {
   ROOMS: DurableObjectNamespace<SignalRoom>;
+  WATCH_ROOMS: DurableObjectNamespace<WatchRoom>;
 }
 
 type Role = "sender" | "viewer";
@@ -78,6 +82,17 @@ export default {
       const room = wsMatch[1];
       if (!ROOM_RE.test(room)) return errorResponse("invalid_room", "Invalid room", 400);
       return env.ROOMS.getByName(`room:${room}`).fetch(request);
+    }
+
+    const watchMatch = url.pathname.match(/^\/watch\/ws\/([^/]+)$/);
+    if (watchMatch) {
+      if (request.method !== "GET") return errorResponse("method_not_allowed", "WebSocket rooms use GET", 405);
+      if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+        return errorResponse("upgrade_required", "Expected a WebSocket upgrade", 426);
+      }
+      const room = watchMatch[1];
+      if (!ROOM_RE.test(room)) return errorResponse("invalid_room", "Invalid room", 400);
+      return env.WATCH_ROOMS.getByName(`watch:${room}`).fetch(request);
     }
 
     const presenceMatch = url.pathname.match(/^\/rtc\/presence\/([^/]+)$/);
