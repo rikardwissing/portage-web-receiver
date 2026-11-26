@@ -2,7 +2,7 @@
   'use strict';
   var LINE_MS = 6000, ENTER_MS = 300, LEAVE_MS = 400, RISE_MS = 3200;
   var MAX_LINES = 3, MAX_REACTIONS = 8, MAX_SEEN = 200;
-  var LINE_SIZE = 0.029, EMOJI_EM = 2.15, COLUMN_WIDTH_EM = 4.3, COLUMN_HEIGHT_EM = 10, RISE_EM = 6.3, LANE_EM = 1.3;
+  var LINE_SIZE = 0.029, EMOJI_EM = 2.15, COLUMN_WIDTH_EM = 7.3, COLUMN_HEIGHT_EM = 10, RISE_EM = 6.3, LANE_EM = 3;
   var FONT = '-apple-system,system-ui,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji"';
   function clip(value, max) {
     var text = String(value == null ? '' : value).replace(/\s+/g, ' ').replace(/^ | $/g, '');
