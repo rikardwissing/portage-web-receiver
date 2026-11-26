@@ -3,7 +3,7 @@
   var LINE_MS = 6000, ENTER_MS = 300, LEAVE_MS = 400, RISE_MS = 3200;
   var MAX_LINES = 3, MAX_REACTIONS = 8, MAX_SEEN = 200;
   var LINE_SIZE = 0.029, EMOJI_EM = 2.15, COLUMN_WIDTH_EM = 7.3, COLUMN_HEIGHT_EM = 10, RISE_EM = 6.3, LANE_EM = 3;
-  var FONT = '-apple-system,system-ui,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji"';
+  var FONT = 'Inter,-apple-system,system-ui,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji"';
   function clip(value, max) {
     var text = String(value == null ? '' : value).replace(/\s+/g, ' ').replace(/^ | $/g, '');
     if (text.length > max) text = text.slice(0, max).replace(/[\ud800-\udbff]$/, '');
@@ -15,6 +15,16 @@
   function prefixed(style, name, value) {
     style['webkit' + name.charAt(0).toUpperCase() + name.slice(1)] = value;
     style[name] = value;
+  }
+  function fonts(base) {
+    if (!document.head || !document.getElementById || document.getElementById('portage-inter')) return;
+    var style = document.createElement('style');
+    style.id = 'portage-inter';
+    var face = function (weight, file) {
+      return '@font-face{font-family:Inter;font-style:normal;font-weight:' + weight + ';font-display:swap;src:url("' + base + file + '") format("woff2")}';
+    };
+    style.textContent = face(400, 'Inter-Regular.woff2') + face(700, 'Inter-Bold.woff2');
+    document.head.appendChild(style);
   }
   function detach(node) { if (node && node.parentNode) node.parentNode.removeChild(node); }
   function blurs() {
@@ -28,6 +38,7 @@
     this.lines = []; this.reactions = []; this.seen = {}; this.seenOrder = []; this.lane = 0;
     this.timer = null; this.signature = '';
     this.blur = this.options.blur !== false && blurs();
+    fonts(this.options.fonts == null ? 'fonts/' : this.options.fonts);
     this.box = document.createElement('div');
     this.box.style.cssText = 'position:fixed;pointer-events:none;overflow:hidden;z-index:1001;display:none;line-height:1.25;color:#fff';
     this.box.style.fontFamily = FONT;
