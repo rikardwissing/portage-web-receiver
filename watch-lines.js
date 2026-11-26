@@ -36,7 +36,7 @@
   function Layer(options) {
     this.options = options || {};
     this.lines = []; this.reactions = []; this.seen = {}; this.seenOrder = []; this.lane = 0;
-    this.timer = null; this.signature = '';
+    this.timer = null; this.signature = ''; this.statusText = '';
     this.blur = this.options.blur !== false && blurs();
     fonts(this.options.fonts == null ? 'fonts/' : this.options.fonts);
     this.box = document.createElement('div');
@@ -48,15 +48,32 @@
     this.rising.style.cssText = 'position:absolute;right:5%';
     this.rising.style.width = COLUMN_WIDTH_EM + 'em';
     this.rising.style.height = COLUMN_HEIGHT_EM + 'em';
+    this.status = document.createElement('div');
+    this.status.style.cssText = 'position:absolute;left:0;right:0;top:5%;text-align:center;display:none';
+    this.statusPill = document.createElement('span');
+    this.statusPill.style.cssText = 'display:inline-block;max-width:80%;box-sizing:border-box;padding:0.42em 1em;border-radius:1.2em;' +
+      'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:0.9em;color:rgba(255,255,255,0.78)';
+    this.statusPill.style.background = this.blur ? 'rgba(11,13,34,0.6)' : 'rgba(11,13,34,0.8)';
+    if (this.blur) { prefixed(this.statusPill.style, 'backdropFilter', 'blur(14px)'); }
+    this.status.appendChild(this.statusPill);
     this.box.appendChild(this.column);
     this.box.appendChild(this.rising);
+    this.box.appendChild(this.status);
     document.body.appendChild(this.box);
   }
   Layer.prototype.handle = function (message) {
     if (!message || typeof message !== 'object') return;
     if (message.op === 'line') this.line(message);
     else if (message.op === 'react') this.react(message);
+    else if (message.op === 'status') this.setStatus(message);
     else if (message.op === 'clear') this.clear();
+  };
+  Layer.prototype.setStatus = function (message) {
+    var text = clip(message && message.text, 80);
+    this.statusText = text;
+    this.statusPill.textContent = text;
+    this.status.style.display = text ? 'block' : 'none';
+    this.ensure();
   };
   Layer.prototype.fresh = function (id) {
     if (id == null || id === '') return true;
@@ -163,6 +180,7 @@
     for (i = 0; i < this.lines.length; i++) { if (this.lines[i].timer) clearTimeout(this.lines[i].timer); detach(this.lines[i].row); }
     for (i = 0; i < this.reactions.length; i++) { if (this.reactions[i].timer) clearTimeout(this.reactions[i].timer); detach(this.reactions[i].node); }
     this.lines = []; this.reactions = [];
+    this.statusText = ''; this.statusPill.textContent = ''; this.status.style.display = 'none';
     this.tick();
   };
   Layer.prototype.ensure = function () {
@@ -171,7 +189,7 @@
     this.tick();
   };
   Layer.prototype.tick = function () {
-    if (!this.lines.length && !this.reactions.length) {
+    if (!this.lines.length && !this.reactions.length && !this.statusText) {
       if (this.timer) { clearInterval(this.timer); this.timer = null; }
       this.box.style.display = 'none'; this.signature = '';
       return;
