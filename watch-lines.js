@@ -1,7 +1,7 @@
 (function (root) {
   'use strict';
   var LINE_MS = 6000, ENTER_MS = 300, LEAVE_MS = 400, RISE_MS = 3200;
-  var MAX_LINES = 3, MAX_REACTIONS = 6, MAX_SEEN = 200, CHECK_MS = 1000;
+  var MAX_LINES = 3, MAX_REACTIONS = 8, MAX_SEEN = 200, CHECK_MS = 1000;
   var CAPSULE = 'rgba(11,13,34,0.8)';
   var LINE_SIZE = 0.029, EMOJI_EM = 2.15, COLUMN_WIDTH_EM = 7.3, COLUMN_HEIGHT_EM = 10, RISE_EM = 6.3, LANE_EM = 3;
   var FONT = 'Inter,-apple-system,system-ui,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji"';
@@ -26,6 +26,104 @@
     };
     style.textContent = face(400, 'Inter-Regular.woff2') + face(700, 'Inter-Bold.woff2');
     document.head.appendChild(style);
+  }
+  function isTone(cp) { return cp >= 0x1f3fb && cp <= 0x1f3ff; }
+  function isRegional(cp) { return cp >= 0x1f1e6 && cp <= 0x1f1ff; }
+  function isTag(cp) { return cp >= 0xe0020 && cp <= 0xe007f; }
+  function isKeycapBase(cp) { return cp === 0x23 || cp === 0x2a || (cp >= 0x30 && cp <= 0x39); }
+  function startsEmoji(cp, next) {
+    if (cp >= 0x1f000 && cp <= 0x1faff) return true;
+    if (cp === 0xa9 || cp === 0xae || cp === 0x203c || cp === 0x2049 || cp === 0x2122 || cp === 0x2139 ||
+        (cp >= 0x2190 && cp <= 0x21ff) || cp === 0x3030 || cp === 0x303d || cp === 0x3297 || cp === 0x3299) return next === 0xfe0f;
+    return (cp >= 0x231a && cp <= 0x23ff) || (cp >= 0x25a0 && cp <= 0x27bf) || (cp >= 0x2900 && cp <= 0x2bff);
+  }
+  function points(text) {
+    var out = [], i = 0, hi, lo;
+    while (i < text.length) {
+      hi = text.charCodeAt(i++);
+      if (hi >= 0xd800 && hi <= 0xdbff && i < text.length) {
+        lo = text.charCodeAt(i);
+        if (lo >= 0xdc00 && lo <= 0xdfff) { out.push((hi - 0xd800) * 0x400 + (lo - 0xdc00) + 0x10000); i++; continue; }
+      }
+      out.push(hi);
+    }
+    return out;
+  }
+  function chars(cps) {
+    var out = '', cp;
+    for (var i = 0; i < cps.length; i++) {
+      cp = cps[i];
+      if (cp > 0xffff) { cp -= 0x10000; out += String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff)); }
+      else out += String.fromCharCode(cp);
+    }
+    return out;
+  }
+  function emojiEnd(cps, at) {
+    var cp = cps[at], i = at + 1;
+    if (isRegional(cp)) return i < cps.length && isRegional(cps[i]) ? i + 1 : i;
+    if (isKeycapBase(cp)) {
+      if (cps[i] === 0xfe0f) i++;
+      return cps[i] === 0x20e3 ? i + 1 : -1;
+    }
+    if (!startsEmoji(cp, cps[i])) return -1;
+    for (;;) {
+      while (i < cps.length && (cps[i] === 0xfe0f || cps[i] === 0xfe0e || cps[i] === 0x20e3 || isTone(cps[i]) || isTag(cps[i]))) i++;
+      if (cps[i] === 0x200d && i + 1 < cps.length && startsEmoji(cps[i + 1], cps[i + 2])) i += 2;
+      else return i;
+    }
+  }
+  function split(text) {
+    var cps = points(String(text)), runs = [], buffer = [], i = 0, end;
+    function flush() { if (buffer.length) { runs.push({text: chars(buffer)}); buffer = []; } }
+    while (i < cps.length) {
+      end = emojiEnd(cps, i);
+      if (end < 0) { buffer.push(cps[i++]); continue; }
+      flush();
+      runs.push({text: chars(cps.slice(i, end)), emoji: cps.slice(i, end)});
+      i = end;
+    }
+    flush();
+    return runs;
+  }
+  function hex(cps) {
+    var names = [];
+    for (var i = 0; i < cps.length; i++) {
+      if (cps[i] === 0xfe0f || cps[i] === 0xfe0e) continue;
+      var h = cps[i].toString(16);
+      while (h.length < 4) h = '0' + h;
+      names.push(h);
+    }
+    return 'emoji_u' + names.join('_') + '.png';
+  }
+  function candidates(cps) {
+    var list = [hex(cps)], i;
+    for (i = 0; i < cps.length; i++) if (cps[i] === 0x200d) return list;
+    var base = hex(cps.slice(0, 1));
+    if (base !== list[0] && !isRegional(cps[0]) && !isKeycapBase(cps[0])) list.push(base);
+    return list;
+  }
+  var missing = {};
+  function glyph(base, run, size) {
+    var names = candidates(run.emoji), at = 0;
+    while (at < names.length && missing[names[at]]) at++;
+    if (at >= names.length) return document.createTextNode(run.text);
+    var img = document.createElement('img');
+    img.alt = run.text;
+    img.style.cssText = 'height:' + size + 'em;width:auto;vertical-align:-0.2em;margin:0 0.03em';
+    img.onerror = function () {
+      missing[names[at]] = true;
+      do { at++; } while (at < names.length && missing[names[at]]);
+      if (at < names.length) img.src = base + names[at];
+      else if (img.parentNode) img.parentNode.replaceChild(document.createTextNode(run.text), img);
+    };
+    img.src = base + names[at];
+    return img;
+  }
+  function fill(parent, text, base, size) {
+    var runs = split(text);
+    for (var i = 0; i < runs.length; i++) {
+      parent.appendChild(runs[i].emoji ? glyph(base, runs[i], size) : document.createTextNode(runs[i].text));
+    }
   }
   function detach(node) { if (node && node.parentNode) node.parentNode.removeChild(node); }
   function animating(style, on) {
@@ -59,6 +157,7 @@
     var self = this;
     if (root.addEventListener) root.addEventListener('resize', function () { self.signature = ''; self.tick(); });
   }
+  Layer.prototype.emojiBase = function () { return this.options.emoji == null ? 'emoji/' : this.options.emoji; };
   Layer.prototype.handle = function (message) {
     if (!message || typeof message !== 'object') return;
     if (message.op === 'line') this.line(message);
@@ -152,7 +251,7 @@
     var face = document.createElement('div');
     face.style.cssText = 'line-height:1.1';
     face.style.fontSize = EMOJI_EM + 'em';
-    face.textContent = emoji;
+    fill(face, emoji, this.emojiBase(), 1);
     var label = document.createElement('div');
     label.style.cssText = 'font-size:0.75em;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 2px rgba(0,0,0,0.8),0 0 3px rgba(0,0,0,0.6)';
     label.style.color = tint(message.tint);
@@ -218,5 +317,5 @@
     if (this.shown) { this.box.style.display = 'none'; this.shown = false; }
     this.signature = '';
   };
-  root.PortageWatchLines = {Layer: Layer};
+  root.PortageWatchLines = {Layer: Layer, split: split, emojiFile: function (cps) { return hex(cps); }, emojiCandidates: candidates};
 }(typeof window !== 'undefined' ? window : this));

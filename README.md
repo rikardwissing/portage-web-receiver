@@ -87,3 +87,10 @@ the signaling hot path.
 ICE currently uses public STUN servers without TURN. Signaling can be healthy
 while peer connectivity still fails when both ends are behind restrictive or
 symmetric NAT. Adding TURN later does not require another signaling redesign.
+
+## Emoji images
+
+`emoji/` holds Noto Color Emoji PNGs (72 px) from googlefonts/noto-emoji, used
+by the Watch Together lines on TVs whose fonts lack newer emoji. They are under
+the Apache License 2.0 (`emoji/LICENSE`); the country flags come from the
+repository's `3D/png/72` set and are public domain.
