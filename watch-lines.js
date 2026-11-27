@@ -3,7 +3,7 @@
   var LINE_MS = 6000, ENTER_MS = 300, LEAVE_MS = 400, RISE_MS = 3200;
   var MAX_LINES = 3, MAX_REACTIONS = 8, MAX_SEEN = 200, CHECK_MS = 1000;
   var CAPSULE = 'rgba(11,13,34,0.8)';
-  var LINE_SIZE = 0.029, EMOJI_EM = 2.15, COLUMN_WIDTH_EM = 7.3, COLUMN_HEIGHT_EM = 10, RISE_EM = 6.3, LANE_EM = 3;
+  var LINE_SIZE = 0.029, EMOJI_EM = 2.15, COLUMN_WIDTH_EM = 7.3, COLUMN_HEIGHT_EM = 10, RISE_EM = 6.3, SPREAD_EM = 3.76, SWAY_EM = 0.47, FADE_MS = 900;
   var FONT = 'Inter,-apple-system,system-ui,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji"';
   function clip(value, max) {
     var text = String(value == null ? '' : value).replace(/\s+/g, ' ').replace(/^ | $/g, '');
@@ -25,6 +25,15 @@
       return '@font-face{font-family:Inter;font-style:normal;font-weight:' + weight + ';font-display:swap;src:url("' + base + file + '") format("woff2")}';
     };
     style.textContent = face(400, 'Inter-Regular.woff2') + face(700, 'Inter-Bold.woff2');
+    document.head.appendChild(style);
+  }
+  function motion() {
+    if (!document.head || !document.getElementById || document.getElementById('portage-watch-motion')) return;
+    var style = document.createElement('style');
+    style.id = 'portage-watch-motion';
+    var sway = 'from{-webkit-transform:translateX(-' + SWAY_EM + 'em);transform:translateX(-' + SWAY_EM + 'em)}to{-webkit-transform:translateX(' + SWAY_EM + 'em);transform:translateX(' + SWAY_EM + 'em)}';
+    var pop = '0%{-webkit-transform:scale(1.45);transform:scale(1.45)}55%{-webkit-transform:scale(0.94);transform:scale(0.94)}80%{-webkit-transform:scale(1.03);transform:scale(1.03)}100%{-webkit-transform:scale(1);transform:scale(1)}';
+    style.textContent = '@-webkit-keyframes pwl-sway{' + sway + '}@keyframes pwl-sway{' + sway + '}@-webkit-keyframes pwl-pop{' + pop + '}@keyframes pwl-pop{' + pop + '}';
     document.head.appendChild(style);
   }
   function isTone(cp) { return cp >= 0x1f3fb && cp <= 0x1f3ff; }
@@ -131,9 +140,10 @@
   }
   function Layer(options) {
     this.options = options || {};
-    this.lines = []; this.reactions = []; this.seen = {}; this.seenOrder = []; this.lane = 0;
+    this.lines = []; this.reactions = []; this.seen = {}; this.seenOrder = []; this.spread = -1;
     this.timer = null; this.signature = ''; this.statusText = ''; this.shown = false;
     fonts(this.options.fonts == null ? 'fonts/' : this.options.fonts);
+    motion();
     this.box = document.createElement('div');
     this.box.style.cssText = 'position:fixed;pointer-events:none;overflow:hidden;z-index:1001;display:none;line-height:1.25;color:#fff';
     this.box.style.fontFamily = FONT;
@@ -242,30 +252,40 @@
     var emoji = clip(message.emoji, 16), name = clip(message.name, 40);
     if (!emoji || !this.fresh(message.id)) return;
     while (this.reactions.length >= MAX_REACTIONS) this.drop(this.reactions[0]);
-    var lane = this.lane; this.lane = 1 - this.lane;
-    var shift = lane === 1 ? 'translateX(-' + LANE_EM + 'em) ' : '';
+    var spread = Math.random();
+    if (this.spread >= 0) while (Math.abs(spread - this.spread) < 0.3) spread = Math.random();
+    this.spread = spread;
+    var riseMs = Math.round(RISE_MS * (0.85 + Math.random() * 0.3));
+    var shift = 'translateX(-' + (spread * SPREAD_EM).toFixed(2) + 'em) ';
     var node = document.createElement('div');
     node.style.cssText = 'position:absolute;left:0;bottom:0;width:100%;text-align:center;opacity:1';
     animating(node.style, true);
     prefixed(node.style, 'transform', shift + 'translateY(0)');
+    var sway = document.createElement('div');
+    prefixed(sway.style, 'animation', 'pwl-sway 0.75s ease-in-out infinite alternate');
+    var pop = document.createElement('div');
+    prefixed(pop.style, 'transformOrigin', '50% 100%');
+    prefixed(pop.style, 'animation', 'pwl-pop 0.45s ease-out both');
     var face = document.createElement('div');
     face.style.cssText = 'line-height:1.1';
     face.style.fontSize = EMOJI_EM + 'em';
     fill(face, emoji, this.emojiBase(), 1);
-    var label = document.createElement('div');
-    label.style.cssText = 'font-size:0.75em;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 2px rgba(0,0,0,0.8),0 0 3px rgba(0,0,0,0.6)';
-    label.style.color = tint(message.tint);
+    var label = document.createElement('span');
+    label.style.cssText = 'display:inline-block;max-width:100%;box-sizing:border-box;padding:0.08em 0.55em;border-radius:1em;font-size:0.68em;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#fff;background:rgba(0,0,0,0.55)';
     label.textContent = name;
-    node.appendChild(face);
-    node.appendChild(label);
+    pop.appendChild(face);
+    pop.appendChild(label);
+    sway.appendChild(pop);
+    node.appendChild(sway);
     this.rising.appendChild(node);
     var self = this, entry = {node: node, timer: null};
     this.reactions.push(entry);
-    entry.timer = setTimeout(function () { self.drop(entry); }, RISE_MS);
+    entry.timer = setTimeout(function () { self.drop(entry); }, riseMs);
     this.ensure();
     void node.offsetHeight;
-    var ease = 'opacity ' + (RISE_MS / 1000) + 's ease-in,-webkit-transform ' + (RISE_MS / 1000) + 's ease-in,transform ' + (RISE_MS / 1000) + 's ease-in';
-    prefixed(node.style, 'transition', ease);
+    var rise = (riseMs / 1000) + 's cubic-bezier(0,0,0.58,1)';
+    var fade = 'opacity ' + (FADE_MS / 1000) + 's ease-in ' + ((riseMs - FADE_MS) / 1000) + 's';
+    prefixed(node.style, 'transition', fade + ',-webkit-transform ' + rise + ',transform ' + rise);
     prefixed(node.style, 'transform', shift + 'translateY(-' + RISE_EM + 'em)');
     node.style.opacity = '0';
   };
