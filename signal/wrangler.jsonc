@@ -6,12 +6,15 @@
   "durable_objects": {
     "bindings": [
       { "name": "ROOMS", "class_name": "SignalRoom" },
-      { "name": "WATCH_ROOMS", "class_name": "WatchRoom" }
+      { "name": "WATCH_ROOMS", "class_name": "WatchRoom" },
+      { "name": "WATCH_CODES", "class_name": "WatchCode" },
+      { "name": "WATCH_GATES", "class_name": "WatchGate" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["SignalRoom"] },
-    { "tag": "v2", "new_sqlite_classes": ["WatchRoom"] }
+    { "tag": "v2", "new_sqlite_classes": ["WatchRoom"] },
+    { "tag": "v3", "new_sqlite_classes": ["WatchCode", "WatchGate"] }
   ],
   "observability": { "enabled": true },
   "env": {
@@ -20,7 +23,9 @@
       "durable_objects": {
         "bindings": [
           { "name": "ROOMS", "class_name": "SignalRoom" },
-          { "name": "WATCH_ROOMS", "class_name": "WatchRoom" }
+          { "name": "WATCH_ROOMS", "class_name": "WatchRoom" },
+          { "name": "WATCH_CODES", "class_name": "WatchCode" },
+          { "name": "WATCH_GATES", "class_name": "WatchGate" }
         ]
       }
     },
@@ -29,7 +34,9 @@
       "durable_objects": {
         "bindings": [
           { "name": "ROOMS", "class_name": "SignalRoom" },
-          { "name": "WATCH_ROOMS", "class_name": "WatchRoom" }
+          { "name": "WATCH_ROOMS", "class_name": "WatchRoom" },
+          { "name": "WATCH_CODES", "class_name": "WatchCode" },
+          { "name": "WATCH_GATES", "class_name": "WatchGate" }
         ]
       }
     }

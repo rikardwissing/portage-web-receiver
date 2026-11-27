@@ -4,19 +4,25 @@
 interface __BaseEnv_Env {
 	ROOMS: DurableObjectNamespace<import("./src/index").SignalRoom>;
 	WATCH_ROOMS: DurableObjectNamespace<import("./src/index").WatchRoom>;
+	WATCH_CODES: DurableObjectNamespace<import("./src/index").WatchCode>;
+	WATCH_GATES: DurableObjectNamespace<import("./src/index").WatchGate>;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {
 		mainModule: typeof import("./src/index");
-		durableNamespaces: "SignalRoom" | "WatchRoom";
+		durableNamespaces: "SignalRoom" | "WatchRoom" | "WatchCode" | "WatchGate";
 	}
 	interface StagingEnv {
 		ROOMS: DurableObjectNamespace<import("./src/index").SignalRoom>;
 		WATCH_ROOMS: DurableObjectNamespace<import("./src/index").WatchRoom>;
+		WATCH_CODES: DurableObjectNamespace<import("./src/index").WatchCode>;
+		WATCH_GATES: DurableObjectNamespace<import("./src/index").WatchGate>;
 	}
 	interface ProductionEnv {
 		ROOMS: DurableObjectNamespace<import("./src/index").SignalRoom>;
 		WATCH_ROOMS: DurableObjectNamespace<import("./src/index").WatchRoom>;
+		WATCH_CODES: DurableObjectNamespace<import("./src/index").WatchCode>;
+		WATCH_GATES: DurableObjectNamespace<import("./src/index").WatchGate>;
 	}
 	interface Env extends __BaseEnv_Env {}
 }

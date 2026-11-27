@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
-import { WatchRoom } from "./watch-room";
+import { WATCH_CODE_RE, WatchCode, WatchGate, WatchRoom, normalizeCode, type WatchEnv } from "./watch-room";
 
-export { WatchRoom };
+export { WatchCode, WatchGate, WatchRoom };
 
 const ROOM_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const SESSION_RE = /^[A-Za-z0-9_-]{1,128}$/;
@@ -14,9 +14,15 @@ const CORS = {
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
-interface Env {
+interface Env extends WatchEnv {
   ROOMS: DurableObjectNamespace<SignalRoom>;
-  WATCH_ROOMS: DurableObjectNamespace<WatchRoom>;
+}
+
+export function codeClient(request: Request): string {
+  const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  if (!address.includes(":")) return address;
+  const groups = address.split("::")[0].split(":");
+  return groups.slice(0, 4).join(":").toLowerCase() + "::/64";
 }
 
 type Role = "sender" | "viewer";
@@ -93,6 +99,25 @@ export default {
       const room = watchMatch[1];
       if (!ROOM_RE.test(room)) return errorResponse("invalid_room", "Invalid room", 400);
       return env.WATCH_ROOMS.getByName(`watch:${room}`).fetch(request);
+    }
+
+    const codeMatch = url.pathname.match(/^\/watch\/code\/([^/]+)$/);
+    if (codeMatch) {
+      if (request.method !== "GET") return errorResponse("method_not_allowed", "Codes use GET", 405);
+      const code = normalizeCode(decodeURIComponent(codeMatch[1]));
+      if (!WATCH_CODE_RE.test(code)) return errorResponse("invalid_code", "Invalid code", 400);
+      const gate = env.WATCH_GATES.getByName(`gate:${codeClient(request)}`);
+      const wait = await gate.retryAfter();
+      if (wait > 0) {
+        return response(JSON.stringify({ error: "slow_down", message: "Too many codes tried", retryAfter: wait }), 429,
+          { "Content-Type": "application/json", "Retry-After": String(wait) });
+      }
+      const room = await env.WATCH_CODES.getByName(`code:${code}`).lookup();
+      if (!room) {
+        await gate.miss();
+        return errorResponse("no_room", "No room with that code", 404);
+      }
+      return json({ room });
     }
 
     const presenceMatch = url.pathname.match(/^\/rtc\/presence\/([^/]+)$/);
