@@ -5,6 +5,7 @@
   var CAPSULE = 'rgba(11,13,34,0.8)';
   var LINE_SIZE = 0.029, EMOJI_EM = 2.15, COLUMN_WIDTH_EM = 7.3, COLUMN_HEIGHT_EM = 10, RISE_EM = 6.3, SPREAD_EM = 3.76, SWAY_EM = 0.47, FADE_MS = 900;
   var FONT = 'Inter,-apple-system,system-ui,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji"';
+  var CARD_ENTER_MS = 400, CARD_LEAVE_MS = 400;
   function clip(value, max) {
     var text = String(value == null ? '' : value).replace(/\s+/g, ' ').replace(/^ | $/g, '');
     if (text.length > max) text = text.slice(0, max).replace(/[\ud800-\udbff]$/, '');
@@ -163,6 +164,7 @@
     this.box.appendChild(this.column);
     this.box.appendChild(this.rising);
     this.box.appendChild(this.status);
+    this.card = null;
     document.body.appendChild(this.box);
     var self = this;
     if (root.addEventListener) root.addEventListener('resize', function () { self.signature = ''; self.tick(); });
@@ -173,6 +175,7 @@
     if (message.op === 'line') this.line(message);
     else if (message.op === 'react') this.react(message);
     else if (message.op === 'status') this.setStatus(message);
+    else if (message.op === 'suggest') this.suggest(message);
     else if (message.op === 'clear') this.clear();
   };
   Layer.prototype.setStatus = function (message) {
@@ -300,8 +303,111 @@
     for (i = 0; i < this.lines.length; i++) { if (this.lines[i].timer) clearTimeout(this.lines[i].timer); detach(this.lines[i].row); }
     for (i = 0; i < this.reactions.length; i++) { if (this.reactions[i].timer) clearTimeout(this.reactions[i].timer); detach(this.reactions[i].node); }
     this.lines = []; this.reactions = [];
+    if (this.card) { if (this.card.timer) clearTimeout(this.card.timer); this.card.timer = null; this.card.shown = false; this.card.node.style.display = 'none'; }
     this.statusText = ''; this.statusPill.textContent = ''; this.status.style.display = 'none';
     this.tick();
+  };
+  function poster(node, source) {
+    var ok = typeof source === 'string' && /^data:image\/(jpeg|png);base64,[A-Za-z0-9+\/=]+$/.test(source) && source.length < 200000;
+    node.innerHTML = '';
+    if (ok) {
+      node.style.backgroundImage = 'url("' + source + '")';
+      node.style.backgroundColor = '#12153A';
+      return;
+    }
+    node.style.backgroundColor = '#12153A';
+    node.style.backgroundImage = 'radial-gradient(circle at 15% 0%,rgba(25,216,230,0.35),rgba(25,216,230,0) 70%),radial-gradient(circle at 100% 100%,rgba(123,69,246,0.3),rgba(123,69,246,0) 70%)';
+    var disc = document.createElement('span');
+    disc.style.cssText = 'position:absolute;left:50%;top:50%;width:1.15em;height:1.15em;margin:-0.575em 0 0 -0.575em;border-radius:50%;background:rgba(255,255,255,0.16)';
+    var play = document.createElement('span');
+    play.style.cssText = 'position:absolute;left:0.37em;top:0.3em;width:0;height:0;border-style:solid;border-width:0.17em 0 0.17em 0.3em;border-color:transparent transparent transparent rgba(255,255,255,0.85)';
+    disc.appendChild(play);
+    node.appendChild(disc);
+  }
+  Layer.prototype.buildCard = function () {
+    var card = document.createElement('div');
+    card.style.cssText = 'position:absolute;top:6%;right:6%;display:none;white-space:nowrap;padding:0.55em 0.9em 0.55em 0.55em;border-radius:0.7em;' +
+      'background:rgba(11,13,34,0.82);box-shadow:0 0.3em 1em rgba(0,0,0,0.45);opacity:0';
+    var art = document.createElement('div');
+    art.style.cssText = 'position:relative;display:inline-block;vertical-align:middle;width:3.2em;height:4.8em;border-radius:0.3em;overflow:hidden;' +
+      'background-size:cover;background-position:center';
+    var text = document.createElement('div');
+    text.style.cssText = 'display:inline-block;vertical-align:middle;margin-left:0.65em;max-width:15em;white-space:nowrap';
+    var who = document.createElement('div');
+    who.style.cssText = 'font-size:0.62em;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#19D8E6;overflow:hidden;text-overflow:ellipsis';
+    var title = document.createElement('div');
+    title.style.cssText = 'font-size:1.05em;font-weight:800;color:#fff;overflow:hidden;text-overflow:ellipsis;line-height:1.15';
+    var sub = document.createElement('div');
+    sub.style.cssText = 'font-size:0.66em;color:rgba(255,255,255,0.6);overflow:hidden;text-overflow:ellipsis';
+    var votes = document.createElement('div');
+    votes.style.cssText = 'margin-top:0.35em;line-height:1.15em;height:1.15em';
+    text.appendChild(who); text.appendChild(title); text.appendChild(sub); text.appendChild(votes);
+    card.appendChild(art); card.appendChild(text);
+    this.box.appendChild(card);
+    this.card = {node: card, art: art, who: who, title: title, sub: sub, votes: votes, id: null, until: 0, timer: null, shown: false};
+    return this.card;
+  };
+  Layer.prototype.suggest = function (message) {
+    message = message || {};
+    var title = clip(message.title, 120);
+    if (!title) return;
+    var ms = Math.max(1000, Math.min(15000, Number(message.ms) || 8000));
+    var card = this.card || this.buildCard(), now = new Date().getTime();
+    var live = card.shown && card.until - now > CARD_LEAVE_MS;
+    if (card.id !== String(message.id) || !live) poster(card.art, message.poster);
+    card.id = String(message.id);
+    card.who.textContent = clip(message.who, 60);
+    card.title.textContent = title;
+    card.sub.textContent = clip(message.sub, 120);
+    card.votes.innerHTML = '';
+    var voters = message.voters && message.voters.length ? message.voters : [], i;
+    for (i = 0; i < voters.length && i < 6; i++) {
+      var dot = document.createElement('span');
+      dot.style.cssText = 'display:inline-block;vertical-align:middle;width:2em;height:2em;line-height:2em;margin-right:0.21em;border-radius:50%;' +
+        'text-align:center;font-size:0.575em;font-weight:700;color:#0B0D22';
+      dot.style.background = tint(voters[i] && voters[i].tint);
+      dot.textContent = clip(voters[i] && voters[i].i, 2);
+      card.votes.appendChild(dot);
+    }
+    var count = document.createElement('span');
+    var counted = Number(message.count) || voters.length;
+    count.style.cssText = 'display:inline-block;vertical-align:middle;margin-left:0.13em;font-size:0.66em;font-weight:700';
+    count.style.color = counted > 1 ? '#19D8E6' : '#fff';
+    count.textContent = clip(message.votes, 20);
+    card.votes.appendChild(count);
+    if (card.timer) { clearTimeout(card.timer); card.timer = null; }
+    card.until = live ? Math.max(card.until, now + ms) : now + ms;
+    if (!live) {
+      card.shown = true;
+      card.node.style.display = 'block';
+      animating(card.node.style, true);
+      prefixed(card.node.style, 'transition', 'none');
+      card.node.style.opacity = '0';
+      prefixed(card.node.style, 'transform', 'translateY(0.6em)');
+      this.ensure();
+      void card.node.offsetHeight;
+      var ease = 'opacity ' + (CARD_ENTER_MS / 1000) + 's ease-out,-webkit-transform ' + (CARD_ENTER_MS / 1000) + 's ease-out,transform ' + (CARD_ENTER_MS / 1000) + 's ease-out';
+      prefixed(card.node.style, 'transition', ease);
+      card.node.style.opacity = '1';
+      prefixed(card.node.style, 'transform', 'translateY(0)');
+    } else {
+      this.ensure();
+    }
+    var self = this;
+    card.timer = setTimeout(function () { self.leaveCard(); }, card.until - now - CARD_LEAVE_MS);
+  };
+  Layer.prototype.leaveCard = function () {
+    var card = this.card, self = this;
+    if (!card || !card.shown) return;
+    prefixed(card.node.style, 'transition', 'opacity ' + (CARD_LEAVE_MS / 1000) + 's ease-in');
+    card.node.style.opacity = '0';
+    card.timer = setTimeout(function () {
+      card.timer = null;
+      card.shown = false;
+      card.node.style.display = 'none';
+      animating(card.node.style, false);
+      self.tick();
+    }, CARD_LEAVE_MS);
   };
   Layer.prototype.ensure = function () {
     var self = this;
@@ -309,7 +415,7 @@
     this.tick();
   };
   Layer.prototype.tick = function () {
-    if (!this.lines.length && !this.reactions.length && !this.statusText) {
+    if (!this.lines.length && !this.reactions.length && !this.statusText && !(this.card && this.card.shown)) {
       if (this.timer) { clearInterval(this.timer); this.timer = null; }
       this.hide();
       return;
