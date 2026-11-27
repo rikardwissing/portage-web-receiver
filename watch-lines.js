@@ -140,7 +140,7 @@
   }
   function Layer(options) {
     this.options = options || {};
-    this.lines = []; this.reactions = []; this.seen = {}; this.seenOrder = []; this.spread = -1;
+    this.lines = []; this.reactions = []; this.seen = {}; this.seenOrder = []; this.spread = -1; this.risePx = 0;
     this.timer = null; this.signature = ''; this.statusText = ''; this.shown = false;
     fonts(this.options.fonts == null ? 'fonts/' : this.options.fonts);
     motion();
@@ -286,7 +286,7 @@
     var rise = (riseMs / 1000) + 's cubic-bezier(0,0,0.58,1)';
     var fade = 'opacity ' + (FADE_MS / 1000) + 's ease-in ' + ((riseMs - FADE_MS) / 1000) + 's';
     prefixed(node.style, 'transition', fade + ',-webkit-transform ' + rise + ',transform ' + rise);
-    prefixed(node.style, 'transform', shift + 'translateY(-' + RISE_EM + 'em)');
+    prefixed(node.style, 'transform', shift + 'translateY(' + (this.risePx ? '-' + Math.round(this.risePx) + 'px' : '-' + RISE_EM + 'em') + ')');
     node.style.opacity = '0';
   };
   Layer.prototype.drop = function (entry) {
@@ -331,7 +331,9 @@
     this.box.style.width = width + 'px'; this.box.style.height = height + 'px';
     this.box.style.fontSize = Math.max(14, height * LINE_SIZE) + 'px';
     this.column.style.bottom = bottom + 'px';
-    this.rising.style.bottom = bottom + 'px';
+    this.rising.style.bottom = Math.round(height * 0.03) + 'px';
+    this.rising.style.height = Math.round(height * 0.85) + 'px';
+    this.risePx = height * 0.72;
   };
   Layer.prototype.hide = function () {
     if (this.shown) { this.box.style.display = 'none'; this.shown = false; }
